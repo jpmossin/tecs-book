@@ -1,0 +1,9 @@
+
+CHIP IDecode {
+	IN in[16];
+
+	OUT ainst,       // Is is an A-instruction
+	writeM,          // Write to M?
+	addressM[15],    // Address in data memory (of M)
+	pc[15];          // address of next instruction
+}
