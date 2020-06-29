@@ -4,3 +4,5 @@ tools/
 *.out
 node_modules
 out
+.hack
+*#
