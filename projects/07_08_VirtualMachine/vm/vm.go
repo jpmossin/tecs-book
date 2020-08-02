@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -23,7 +24,9 @@ func TranslateFiles(dirOrFilePath string) {
 	if len(files) == 1 {
 		outfile = strings.ReplaceAll(files[0], ".vm", ".asm")
 	} else {
-		outfile = "./out.asm"
+		dirPath, _ := filepath.Abs(dirOrFilePath)
+		_, dirName := filepath.Split(dirPath)
+		outfile = dirPath + "/" + dirName + ".asm"
 	}
 	translator := createTranslator(outfile)
 	defer translator.done()

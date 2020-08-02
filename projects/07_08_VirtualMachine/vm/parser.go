@@ -15,7 +15,7 @@ const (
 	CPop
 	CLabel
 	CGoto
-	CIf
+	CIfGoto
 	CFunction
 	CReturn
 	CCall
@@ -37,7 +37,7 @@ var commandNames = map[string]commandType{
 	"pop":      CPop,
 	"label":    CLabel,
 	"goto":     CGoto,
-	"if":       CIf,
+	"if-goto":  CIfGoto,
 	"function": CFunction,
 	"return":   CReturn,
 	"call":     CCall,
@@ -52,21 +52,15 @@ var commandNames = map[string]commandType{
 	"not":      CNot,
 }
 
-func cmdName(cmd commandType) string {
-	for name, t := range commandNames {
-		if t == cmd {
-			return name
-		}
-	}
-	return "UNKNOWN:" + strconv.Itoa(cmd);
-}
-
 type vmInstruction struct {
+	raw         string
 	commandType commandType
 
-	// The segment and index args are null when an instruction does not include them
-	segment *string
-	index   *int
+	// The meaning (and presence) of these args depend on the instruction,
+	// e.g., "add" has no args, for "pop/push seg n" arg1=segment and arg2=index,
+	// for "function f n" arg1=function name and arg2=number of arguments.
+	arg1 *string
+	arg2 *int
 }
 
 func parse(filePath string) []vmInstruction {
@@ -99,25 +93,26 @@ func parseInstruction(line string) vmInstruction {
 		log.Fatalf("Unrecognized command: %s\n", line)
 	}
 
-	var segment *string
-	var index *int
+	var arg1 *string
+	var arg2 *int
 	// If there are segment and/or index args,
 	//just include them regardless of the command to keep it simple
 	if len(parts) >= 2 {
-		segment = &parts[1]
+		arg1 = &parts[1]
 	}
 	if len(parts) >= 3 {
 		idx, err := strconv.Atoi(parts[2])
 		if err != nil {
 			log.Fatal("Error parsing index arg for: " + line)
 		}
-		index = &idx
+		arg2 = &idx
 	}
 
 	return vmInstruction{
+		raw:         line,
 		commandType: cmdType,
-		segment:     segment,
-		index:       index,
+		arg1:        arg1,
+		arg2:        arg2,
 	}
 
 }

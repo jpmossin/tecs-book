@@ -13,6 +13,8 @@ import (
 // from one or more input vm files.
 type translator struct {
 	writer *bufio.Writer
+
+	currentFunction string
 }
 
 func createTranslator(outfile string) *translator {
@@ -26,7 +28,7 @@ func createTranslator(outfile string) *translator {
 }
 
 func (t *translator) translateVMInstructions(instructions []vmInstruction, fileName string) error {
-	t.writeASM(memoryInit())
+	t.writeASM(bootstrapCode())
 
 	for _, instruction := range instructions {
 		var asm string
@@ -38,13 +40,108 @@ func (t *translator) translateVMInstructions(instructions []vmInstruction, fileN
 			asm = translatePush(instruction, fileName)
 		case CPop:
 			asm = translatePop(instruction, fileName)
+		case CLabel:
+			asm = translateLabel(instruction, t.currentFunction)
+		case CGoto:
+			asm = translateGoto(instruction, t.currentFunction)
+		case CIfGoto:
+			asm = translateIfGoto(instruction, t.currentFunction)
+		case CCall:
+			asm = translateCall(instruction)
+		case CFunction:
+			t.currentFunction = *instruction.arg1
+			asm = translateFunction(instruction)
+		case CReturn:
+			asm = translateReturn(instruction)
 		default:
-			log.Fatalln("Unhandled command type: " + cmdName(cmd))
+			log.Fatalln("Unhandled instruction: " + instruction.raw)
 		}
+		t.writeASM("// " + instruction.raw + "\n")
 		t.writeASM(asm)
 	}
 
 	return nil
+}
+
+func translateReturn(instruction vmInstruction) string {
+	// Restore SP for the caller, with return value on top of stack
+	asm := popStack + "D=M\n@R14\nM=D\n"  // tmp=pop()
+	asm += "@ARG\nD=M\n@SP\nM=D\n"  // sp=arg
+	asm += "@R14\nD=M\n" + pushDToStack  // push(tmp)
+
+	asm += "@LCL\nD=M\n@R14\nM=D\n" // store current LCL so that we can get return address below
+
+	// Restore segment registers for the caller; THAT=LCL-1, THIS=LCL-2 etc
+	for _, segmentReg := range []string{"THAT", "THIS", "ARG", "LCL"} {
+		asm += "@LCL\n"
+		asm += "AM=M-1\n"
+		asm += "D=M\n"
+		asm += "@" + segmentReg + "\nM=D\n"
+	}
+
+	// Get return address (old LCL -5) and jump
+	asm += "@R14\nD=M\n@5\nA=D-A\nA=M\n0;JMP\n"
+
+	return asm
+}
+
+func translateCall(instruction vmInstruction) string {
+	// push return address
+	returnLabel := nextDynamicLabel()
+	asm := "@" + returnLabel + "\nD=A\n" + pushDToStack
+
+	// push segment addresses
+	for _, segmentReg := range []string{"LCL", "ARG", "THIS", "THAT"} {
+		asm += "@" + segmentReg + "\nA=M\nD=A\n" + pushDToStack
+	}
+
+	// Reposition ARG; ARG=SP-5-n (where 5 = the stuff pushed above)
+	numArgs := *instruction.arg2
+	asm += loadStackAdr +
+		"D=A\n@5\nD=D-A\n@" + strconv.Itoa(numArgs) + "\nD=D-A\n" +
+		"@ARG\nM=D\n"
+	// Reposition LCL;, LCL=SP
+	asm += loadStackAdr + "D=A\n@LCL\nM=D\n"
+
+	// goto function
+	funcName := *instruction.arg1
+	asm += "@" + funcName + "\n"
+	asm += "0;JMP\n"
+
+	asm += label(returnLabel)
+	return asm
+}
+
+func translateFunction(instruction vmInstruction) string {
+	funcName := *instruction.arg1
+	numLocals := *instruction.arg2
+
+	asm := label(funcName)
+	asm += "D=0\n"
+	for i := 0; i < numLocals; i++ {
+		asm += pushDToStack
+	}
+	return asm
+}
+
+func translateIfGoto(instruction vmInstruction, function string) string {
+	target := function + "$" + *instruction.arg1
+	return popStack +
+		"D=M\n" +
+		"@" + target + "\n" +
+		"D;JNE\n"
+}
+
+func translateGoto(instruction vmInstruction, function string) string {
+	target := function + "$" + *instruction.arg1
+	asm := "@" + target + "\n"
+	asm += "0;JMP\n"
+	return asm
+}
+
+func translateLabel(instruction vmInstruction, function string) string {
+	l := *instruction.arg1
+	return label(function + "$" + l)
 }
 
 func (t *translator) writeASM(asm string) {
@@ -54,19 +151,23 @@ func (t *translator) writeASM(asm string) {
 	}
 }
 
-func memoryInit() string {
+func bootstrapCode() string {
 	baseAddress := map[string]string{
 		"0": "256",  // SP
-		"1": "300",  // LCL
-		"2": "400",  // ARG
-		"3": "3000", // THIS
-		"4": "3010", // THAT
+		//"1": "300",  // LCL
+		//"2": "400",  // ARG
+		//"3": "3000", // THIS
+		//"4": "3010", // THAT
 	}
 	var asm string
 	for reg, base := range baseAddress {
 		asm += "@" + base + "\nD=A\n" +
 			"@" + reg + "\nM=D\n"
 	}
+
+	// todo call og ikke bare jump?
+	asm += "@Sys.init\n0;JMP\n"
+
 	return asm
 }
 
@@ -78,8 +179,8 @@ func (t *translator) done() {
 }
 
 func translatePush(iPush vmInstruction, fileName string) string {
-	seg := *iPush.segment
-	idx := *iPush.index
+	seg := *iPush.arg1
+	idx := *iPush.arg2
 	idxS := strconv.Itoa(idx)
 	var asm string
 	switch seg {
@@ -90,7 +191,7 @@ func translatePush(iPush vmInstruction, fileName string) string {
 	case "local", "argument", "this", "that":
 		asm = readHeapSegmentToD(segmentBaseRegister(seg), idx)
 	case "pointer", "temp":
-		adr := fixedRamSegmentAdr(seg, *iPush.index)
+		adr := fixedRamSegmentAdr(seg, *iPush.arg2)
 		asm = "@" + strconv.Itoa(adr) + "\n" +
 			"D=M\n"
 	case "static":
@@ -105,8 +206,8 @@ func translatePush(iPush vmInstruction, fileName string) string {
 }
 
 func translatePop(iPop vmInstruction, fileName string) string {
-	seg := *iPop.segment
-	idx := *iPop.index
+	seg := *iPop.arg1
+	idx := *iPop.arg2
 
 	var asm string
 	switch seg {
@@ -181,7 +282,7 @@ func translateArithmetic(instruction vmInstruction) string {
 	case CNot:
 		asm += "M=!M\n"
 	default:
-		log.Fatalln("Unhandled command type: " + cmdName(op))
+		log.Fatalln("Unhandled command type: " + instruction.raw)
 	}
 
 	asm += incSP
@@ -204,7 +305,8 @@ func readHeapSegmentToD(segmentRegister string, index int) string {
 }
 
 func logicalCmd(jumpCmd string) string {
-	// todo: can we skip the jump and just do bit stuff? (No, because we need true=-1 and not just some nonzero value?)
+	// todo: can we skip the jump and just do bit stuff?
+	// (No, because we need true=-1 and not just some nonzero value?)
 	jumpLabel := nextDynamicLabel()
 	doneLabel := nextDynamicLabel()
 	return "D=M-D\n" +
@@ -224,7 +326,7 @@ var dynamicLabelIdx = 0
 
 func nextDynamicLabel() string {
 	dynamicLabelIdx += 1
-	return "XYZLabel" + strconv.Itoa(dynamicLabelIdx)
+	return "$DynLabel$" + strconv.Itoa(dynamicLabelIdx)
 }
 
 func label(l string) string {
